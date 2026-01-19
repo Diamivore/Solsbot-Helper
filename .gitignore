@@ -11,3 +11,5 @@ SolsBot Helper.session.sql
 /cogs/__pycache__
 *.log
 example.json
+.DS_Store
+**/.DS_Store
