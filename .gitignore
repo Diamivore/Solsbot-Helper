@@ -1,0 +1,13 @@
+# Snyk Security Extension - AI Rules (auto-generated)
+.github/instructions/snyk_rules.instructions.md
+.env
+/lib
+/include
+/.github
+/.vscode
+/bin
+pyvenv.cfg
+SolsBot Helper.session.sql
+/cogs/__pycache__
+*.log
+example.json
