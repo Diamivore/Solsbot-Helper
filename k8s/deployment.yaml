@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solsbot-helper
+  namespace: solsbot
+  labels:
+    app.kubernetes.io/name: solsbot-helper
+    app.kubernetes.io/component: discord-bot
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  # CRITICAL: Only ONE replica - bot maintains persistent WebSocket connections
+  # Do NOT increase this value - multiple instances would cause duplicate notifications
+  replicas: 1
+  
+  # Recreate strategy ensures old pod is fully terminated before new one starts
+  # This prevents two instances from running simultaneously during updates
+  strategy:
+    type: Recreate
+  
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: solsbot-helper
+  
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: solsbot-helper
+        app.kubernetes.io/component: discord-bot
+      annotations:
+        # Update this value to force pod restart when config changes
+        # Run: kubectl annotate deployment solsbot-helper -n solsbot restart=$(date +%s) --overwrite
+        config-version: "1"
+    spec:
+      # Disable service account token automounting (not needed for this bot)
+      automountServiceAccountToken: false
+      
+      # DNS config for reliable external connectivity
+      dnsPolicy: ClusterFirst
+      
+      containers:
+        - name: solsbot-helper
+          image: diamivore/solsbot-helper:latest
+          imagePullPolicy: Always
+          
+          # Environment variables from secrets
+          envFrom:
+            - secretRef:
+                name: solsbot-secrets
+            - configMapRef:
+                name: solsbot-config
+          
+          # Resource limits and requests
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          
+          # Writable tmp directory for any temp files
+          volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+      
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+      
+      # =================================================================
+      # Graceful Shutdown Configuration
+      # =================================================================
+      
+      # CRITICAL: Allow enough time for graceful shutdown
+      # The bot needs to:
+      # 1. Close Discord connection (bot.close())
+      # 2. Close WebSocket connections
+      # 3. Close database connections
+      # 4. Cancel and await background tasks
+      terminationGracePeriodSeconds: 60
+      
+      # Restart policy (always restart on failure)
+      restartPolicy: Always
+      
+      # Pod scheduling preferences
+      # Prefer nodes with more memory for stable long-running connections
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - amd64
+                      - arm64
+      
+      # Tolerate brief node issues before rescheduling
+      tolerations:
+        - key: "node.kubernetes.io/not-ready"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 300
+        - key: "node.kubernetes.io/unreachable"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 300

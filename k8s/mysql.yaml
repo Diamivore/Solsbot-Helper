@@ -1,0 +1,357 @@
+# MySQL 8.0 StatefulSet for solsbot namespace
+# Deploy after namespace.yaml and before deployment.yaml
+# Replace placeholder passwords before production (use: echo -n 'password' | base64)
+
+---
+# MySQL credentials (base64-encoded)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: solsbot
+  labels:
+    app: mysql
+    component: database
+type: Opaque
+data:
+  # PLACEHOLDER: Replace with your actual base64-encoded root password
+  # echo -n 'CHANGE_ME_ROOT_PASSWORD' | base64
+  MYSQL_ROOT_PASSWORD: Q0hBTkdFX01FX1JPT1RfUEFTU1dPUkQ=
+  
+  # Database name: solsbot_db (base64 encoded)
+  MYSQL_DATABASE: c29sc2JvdF9kYg==
+  
+  # Database user: solsbot (base64 encoded)
+  MYSQL_USER: c29sc2JvdA==
+  
+  # PLACEHOLDER: Replace with your actual base64-encoded user password
+  # echo -n 'CHANGE_ME_USER_PASSWORD' | base64
+  MYSQL_PASSWORD: Q0hBTkdFX01FX1VTRVJfUEFTU1dPUkQ=
+
+---
+# Headless service for StatefulSet - provides stable DNS (mysql-0.mysql-service.solsbot.svc.cluster.local)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: solsbot
+  labels:
+    app: mysql
+    component: database
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+    component: database
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+      protocol: TCP
+
+---
+# MySQL 8.0 StatefulSet with persistent storage
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: solsbot
+  labels:
+    app: mysql
+    component: database
+spec:
+  # Service name must match the headless service
+  serviceName: mysql-service
+  
+  # Single replica for basic deployment
+  # For HA, use MySQL Operator or implement replication
+  replicas: 1
+  
+  # Selector must match template labels
+  selector:
+    matchLabels:
+      app: mysql
+      component: database
+  
+  # Pod template
+  template:
+    metadata:
+      labels:
+        app: mysql
+        component: database
+    spec:
+      # =========================================================================
+      # Security Context (Pod Level)
+      # =========================================================================
+      # MySQL official image runs as mysql user (uid 999) by default.
+      # We set fsGroup to ensure volume permissions are correct.
+      # =========================================================================
+      securityContext:
+        # Run pod processes as mysql group for volume access
+        fsGroup: 999
+        # Prevent privilege escalation for all containers
+        runAsNonRoot: true
+      
+      # Graceful termination - give MySQL time to flush data
+      terminationGracePeriodSeconds: 60
+      
+      containers:
+        - name: mysql
+          # Using MySQL 8.0 - specify minor version for reproducibility in prod
+          image: mysql:8.0
+          
+          # =======================================================================
+          # Security Context (Container Level)
+          # =======================================================================
+          # Additional security hardening at container level
+          # =======================================================================
+          securityContext:
+            # Run as mysql user (uid 999 in official image)
+            runAsUser: 999
+            runAsGroup: 999
+            # Prevent privilege escalation
+            allowPrivilegeEscalation: false
+            # Read-only root filesystem (MySQL writes to mounted volumes)
+            readOnlyRootFilesystem: false
+            # Drop all capabilities, add only what's needed
+            capabilities:
+              drop:
+                - ALL
+          
+          # =======================================================================
+          # Environment Variables from Secret
+          # =======================================================================
+          # All sensitive values pulled from mysql-secret
+          # =======================================================================
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_DATABASE
+            
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_USER
+            
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+          
+          # =======================================================================
+          # Ports
+          # =======================================================================
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          
+          # =======================================================================
+          # Resource Limits and Requests
+          # =======================================================================
+          # Requests: Guaranteed resources (used for scheduling)
+          # Limits: Maximum resources (enforced by cgroups)
+          #
+          # Tune these based on your workload:
+          # - Monitor actual usage with kubectl top pods
+          # - Adjust accordingly for production load
+          # =======================================================================
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          
+          # =======================================================================
+          # Volume Mounts
+          # =======================================================================
+          # MySQL data directory mounted to persistent storage
+          # =======================================================================
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            # Optional: Custom MySQL configuration
+            # - name: mysql-config
+            #   mountPath: /etc/mysql/conf.d
+          
+          # =======================================================================
+          # Liveness Probe
+          # =======================================================================
+          # Determines if the container should be restarted.
+          # Uses mysqladmin ping to check if MySQL is responding.
+          #
+          # Configuration rationale:
+          # - initialDelaySeconds: 60 - MySQL needs time to initialize on first start
+          # - periodSeconds: 10 - Check every 10 seconds
+          # - timeoutSeconds: 5 - Allow 5 seconds for response
+          # - failureThreshold: 3 - Restart after 3 consecutive failures
+          # =======================================================================
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -u
+                - root
+                - --password=$(MYSQL_ROOT_PASSWORD)
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          
+          # =======================================================================
+          # Readiness Probe
+          # =======================================================================
+          # Determines if the container should receive traffic.
+          # More aggressive than liveness - we want to know quickly when ready.
+          #
+          # Configuration rationale:
+          # - initialDelaySeconds: 30 - Wait for basic startup
+          # - periodSeconds: 5 - Check frequently for faster readiness detection
+          # - timeoutSeconds: 3 - Shorter timeout for readiness
+          # - failureThreshold: 3 - Mark unready after 3 failures
+          # =======================================================================
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -u
+                - root
+                - --password=$(MYSQL_ROOT_PASSWORD)
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          
+          # =======================================================================
+          # Startup Probe (Optional but recommended)
+          # =======================================================================
+          # Protects slow-starting containers.
+          # MySQL can take a while on first initialization or after crashes.
+          # This prevents liveness probe from killing the container during startup.
+          # =======================================================================
+          startupProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -u
+                - root
+                - --password=$(MYSQL_ROOT_PASSWORD)
+            # Allow up to 5 minutes for startup (30 * 10 seconds)
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+  
+  # =============================================================================
+  # Volume Claim Templates
+  # =============================================================================
+  # Creates a PersistentVolumeClaim for each pod in the StatefulSet.
+  # PVCs persist across pod restarts and rescheduling.
+  #
+  # Storage class notes:
+  # - Default uses cluster's default StorageClass
+  # - For cloud providers: gp2 (AWS), standard (GCP), default (Azure)
+  # - For local development: hostpath or local-path provisioner
+  # =============================================================================
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+        labels:
+          app: mysql
+          component: database
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # Uncomment and set your storage class for production
+        # storageClassName: "gp2"  # AWS EBS
+        # storageClassName: "standard"  # GCP
+        # storageClassName: "managed-premium"  # Azure
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+# =============================================================================
+# Optional: MySQL Configuration ConfigMap
+# =============================================================================
+# Uncomment this section to customize MySQL configuration.
+# Mount to /etc/mysql/conf.d in the container.
+# =============================================================================
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: mysql-config
+#   namespace: solsbot
+#   labels:
+#     app: mysql
+#     component: database
+# data:
+#   custom.cnf: |
+#     [mysqld]
+#     # Performance tuning
+#     innodb_buffer_pool_size = 256M
+#     max_connections = 100
+#     
+#     # Character set
+#     character-set-server = utf8mb4
+#     collation-server = utf8mb4_unicode_ci
+#     
+#     # Logging (for debugging - disable in production)
+#     # slow_query_log = 1
+#     # slow_query_log_file = /var/log/mysql/slow.log
+#     # long_query_time = 2
+
+# =============================================================================
+# Deployment Notes
+# =============================================================================
+# 
+# 1. BEFORE DEPLOYING: Replace placeholder passwords in the Secret!
+#    echo -n 'your-secure-root-password' | base64
+#    echo -n 'your-secure-user-password' | base64
+#
+# 2. Deploy order:
+#    kubectl apply -f namespace.yaml
+#    kubectl apply -f mysql.yaml
+#    kubectl apply -f secrets.yaml      # Bot secrets
+#    kubectl apply -f configmap.yaml
+#    kubectl apply -f deployment.yaml
+#
+# 3. Verify deployment:
+#    kubectl get statefulset -n solsbot
+#    kubectl get pods -n solsbot -l app=mysql
+#    kubectl get pvc -n solsbot
+#
+# 4. Connect to MySQL for debugging:
+#    kubectl exec -it mysql-0 -n solsbot -- mysql -u root -p
+#
+# 5. Check logs:
+#    kubectl logs mysql-0 -n solsbot
+#
+# 6. Connection string for the bot:
+#    mysql://solsbot:PASSWORD@mysql-service.solsbot.svc.cluster.local:3306/solsbot_db
+#
+# =============================================================================

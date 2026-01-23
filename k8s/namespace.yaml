@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: solsbot
+  labels:
+    app.kubernetes.io/name: solsbot-helper
+    app.kubernetes.io/component: discord-bot
+    app.kubernetes.io/managed-by: kubectl

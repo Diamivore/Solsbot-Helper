@@ -8,10 +8,9 @@ import colorlog
 import sys
 from disnake.ext import commands
 import argparse
-from threading import Thread
+import time
 
-from cogs._websocket import WebSocketClient, WORKERNOTDEFINED
-from cogs._tortoiseORM_handler import DB
+from infrastructure import Database, WebSocketClient, WORKERNOTDEFINED
 
 # Set up argument parsing for --verbose
 parser = argparse.ArgumentParser(description="Solsbot Helper")
@@ -26,7 +25,7 @@ def setup_logger():
         logger.setLevel(logging.DEBUG)
     elif args.silent:
         logging.disable()
-        return
+        return logger  # Still return the logger object
     else:
         logger.setLevel(logging.INFO)
         logging.getLogger("asyncmy").setLevel(logging.ERROR)
@@ -84,89 +83,113 @@ logging.getLogger("asyncmy").addFilter(NoTableExistsFilter())
 
 class SolsbotHelper(commands.InteractionBot):
     def __init__(self):
-        intents = disnake.Intents.default()
-        intents.members = True
-        super().__init__(
-            intents=intents,
-        )
         dotenv.load_dotenv()
         self.logger = logging.getLogger(__name__)
-        self.db = DB(os.environ.get("DB_URL"))
+        
+        # Determine environment mode
+        self.environment = os.environ.get("ENVIRONMENT", "development").lower()
+        is_production = self.environment == "production"
+        
+        # Validate required env vars
+        sols_token = os.environ.get("SOLS_BOT_TOKEN")
+        
+        # Select database URL based on environment
+        if is_production:
+            db_url = os.environ.get("DB_URL")
+            db_name = "DB_URL"
+        else:
+            # In development, prefer DEV_DB_URL, fallback to DB_URL
+            db_url = os.environ.get("DEV_DB_URL") or os.environ.get("DB_URL")
+            db_name = "DEV_DB_URL" if os.environ.get("DEV_DB_URL") else "DB_URL"
+        
+        # Select bot token based on environment
+        if is_production:
+            bot_token = os.environ.get("BOT_TOKEN")
+            token_name = "BOT_TOKEN"
+        else:
+            # In development, prefer BOT_TOKEN_DEV, fallback to BOT_TOKEN
+            bot_token = os.environ.get("BOT_TOKEN_DEV") or os.environ.get("BOT_TOKEN")
+            token_name = "BOT_TOKEN_DEV" if os.environ.get("BOT_TOKEN_DEV") else "BOT_TOKEN"
+        
+        if not all([db_url, bot_token, sols_token]):
+            raise RuntimeError(
+                "Missing required environment variables: "
+                f"{db_name}={bool(db_url)}, {token_name}={bool(bot_token)}, SOLS_BOT_TOKEN={bool(sols_token)}"
+            )
+        
+        self.logger.info(f"Starting in {self.environment.upper()} mode (using {token_name}, {db_name})")
+        
+        intents = disnake.Intents.default()
+        intents.members = True
+        super().__init__(intents=intents)
+        
+        self.db = Database(db_url)
         self.ws_manager = WebSocketClient(self)
-        self.TOKEN = os.environ.get("BOT_TOKEN")
-        self.usernames: list = []
-
+        self.TOKEN = bot_token
         self.queue = set()
 
 
     async def start(self, *args, **kwargs) -> None:
-        # Initialize database connection, start workers from keys in database,
-        #   and set up queue processor to handle api events
-
         # Database initialization
         try:
             await self.db.start()
-        except:
-            self.logger.error("Something went wrong while initializing the database")
+        except Exception as e:
+            self.logger.error(f"Something went wrong while initializing the database: {e}")
             raise
 
-        # Initialize queue processor & websocket worker
+        # Initialize websocket connection
         self.logger.info("Starting websocket connection...")
         try:
             await self.start_websocket()
             self.logger.info("Websocket worker up!")
-        except:
-            self.logger.error("Something went wrong while starting the websocket connection")
+        except Exception as e:
+            self.logger.error(f"Something went wrong while starting the websocket connection: {e}")
             raise
 
-
-        # Initialize usernames list 
-        self.logger.info("Initializing usernames list...")
-        usernames = await DB.get_all_users()
-        self.usernames = usernames
-
-
+        # Start queue processor (initializes service layer with username cache)
         self.logger.info("Starting queue processor...")
         try:
             self.start_queue_processor()
             self.logger.info("Queue processor up!")
-        except:
-            self.logger.error("Something went wrong while starting the queue processor")
+        except Exception as e:
+            self.logger.error(f"Something went wrong while starting the queue processor: {e}")
             raise
 
+        # Start health check writer for Kubernetes probes
+        self.logger.info("Starting health check writer...")
+        health_task = asyncio.create_task(health_writer())
+        self.queue.add(health_task)
+        health_task.add_done_callback(self.queue.discard)
 
-        bot.logger.info("Starting bot...")
+
+        self.logger.info("Starting bot...")
 
         await super().start(*args, **kwargs)
 
-    # Builds a container for the queue processor asyncio & main api worker tasks to live in
-    # This ensures python garbage collection doesn't sweep it away
-    #   since it's a part of the SolsbotHelper class which won't go out of scope
-    #   until the bot is terminated
+    # Task container to prevent garbage collection
     async def start_websocket(self):
         ready_event = asyncio.Event()
 
         worker = self.ws_manager.websocket_worker(
             os.environ.get("SOLS_BOT_TOKEN"),
             ready_event
-            )
+        )
         worker_queue = asyncio.create_task(worker)
 
         self.queue.add(worker_queue)
         worker_queue.add_done_callback(self.queue.discard)
 
         self.starting_up = asyncio.Event()
-        for i in range(1, 5):
+        for i in range(1, 3):
             try:
                 await asyncio.wait_for(ready_event.wait(), timeout=10.0)
                 self.starting_up.set()
+                return 
             except asyncio.TimeoutError:
-                self.logger.error(f"Connection timed out ({i}/5), please wait...")
-                if i == 5:
+                self.logger.error(f"Connection timed out ({i}/2), please wait...")
+                if i == 2:
                     self.logger.error("Failure while connecting to websocket API. Is the API URL working?")
-                    break
-                else:
-                    continue
+                    raise RuntimeError("Websocket connection failed after 2 retries")
 
     def start_queue_processor(self) -> None:
         process = self.ws_manager.queue_processor()
@@ -177,7 +200,7 @@ class SolsbotHelper(commands.InteractionBot):
 
 
     async def on_ready(self) -> None:
-        self.logger.info(f"Logged in as {bot.user}!")
+        self.logger.info(f"Logged in as {self.user}!")
         app_info = await self.application_info()
         self.logger.info(f"Bot Owner: {app_info.owner} (ID: {app_info.owner.id})")
         self.logger.info("Bot is running! Press (q) + enter to quit or (r) + enter to restart the bot.")
@@ -186,11 +209,19 @@ class SolsbotHelper(commands.InteractionBot):
         self.logger.warning("Shutting bot down")
         try:
             await self.db.stop()
+            
+            # Cancel and wait for background tasks
+            for task in self.queue:
+                task.cancel()
+            
+            # Give cancelled tasks time to finish
+            if self.queue:
+                await asyncio.gather(*self.queue, return_exceptions=True)
+            
             await super().close()
             self.logger.info("Shutdown processed successfully")
         except Exception as e:
-            self.logger.error("Something went wrong while shutting down\nForcefully shutting down...")
-            self.logger.error(f"Shut down with errors: {e}")
+            self.logger.error(f"Something went wrong while shutting down: {e}")
 
 
 bot = SolsbotHelper()
@@ -203,28 +234,23 @@ def load_cogs() -> None:
             try:
                 bot.load_extension(extension_name)
                 bot.logger.info(f"Cogs: {extension_name} loaded successfully")
-            except:
-                bot.logger.error(f"Cogs: Failed to initialize {extension_name}")
+            except Exception as e:
+                bot.logger.error(f"Cogs: Failed to initialize {extension_name}: {e}")
                 raise
 
 
-# Define methods to quit and restart from terminal
-def restart_bot() -> None:
-    logging.getLogger(__name__).warning("Restarting bot...")
-    os.execv(sys.executable, ["python3"] + sys.argv)
-
-async def terminal_input(bot: SolsbotHelper) -> None:
+async def health_writer():
+    """Write health file for Kubernetes probes. Uses thread to avoid blocking event loop."""
+    def _write_health():
+        with open('/tmp/health', 'w') as f:
+            f.write(str(time.time()))
+    
     while True:
-        user_input = await asyncio.to_thread(input)
-
-        if user_input.lower().strip() == "q":
-            await bot.close()
-            break
-
-        elif user_input.lower().strip() == "r":
-            await bot.close()
-            restart_bot()
-            break
+        try:
+            await asyncio.to_thread(_write_health)
+        except Exception:
+            pass  # Non-critical, don't crash on health write failure
+        await asyncio.sleep(10)
 
 
 def main() -> None:
@@ -237,17 +263,7 @@ def main() -> None:
     else:
         bot.logger.info("All cogs loaded successfully!")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    loop.create_task(terminal_input(bot))
-
-    try:
-        loop.run_until_complete(bot.start(f"{bot.TOKEN}"))
-    except KeyboardInterrupt:
-        loop.run_until_complete(bot.close())
-    finally:
-        loop.close()
+    bot.run(bot.TOKEN)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-# Snyk Security Extension - AI Rules (auto-generated)
 .github/instructions/snyk_rules.instructions.md
+.github/copilot-instructions.md
 .env
 /lib
 /include
@@ -8,8 +8,18 @@
 /bin
 pyvenv.cfg
 SolsBot Helper.session.sql
-/cogs/__pycache__
 *.log
 example.json
 .DS_Store
 **/.DS_Store
+/tests/*
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Kubernetes secrets - use secrets.yaml.example as template
+k8s/secrets.yaml
+k8s/*-secret.yaml

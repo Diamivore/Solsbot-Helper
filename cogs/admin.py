@@ -1,9 +1,11 @@
 from disnake.ext import commands
 import disnake
+import disnake.ui as ui
 import logging
-from ._tortoiseORM_handler import DB
 import json
-from . import _models
+
+from models import GuildSettings, User
+from services import GuildService
 
 # Commands:
 # Toggle subscriptions
@@ -26,10 +28,8 @@ class ConfirmView(disnake.ui.View):
         for child in self.children:
             child.disabled = True
 
-        await inter.response.edit_message(
-            "Disabled subscription messaging.",
-            view=None
-        )
+        embed = disnake.Embed(description="Disabled subscription messaging.")
+        await inter.response.edit_message(embed=embed, view=None)
         self.stop()
 
     @disnake.ui.button(label="Cancel", style=disnake.ButtonStyle.red)
@@ -38,10 +38,8 @@ class ConfirmView(disnake.ui.View):
         for child in self.children:
             child.disabled = True
 
-        await inter.response.edit_message(
-            "Process cancelled.",
-            view=None
-        )
+        embed = disnake.Embed(description="Process cancelled.")
+        await inter.response.edit_message(embed=embed, view=None)
         self.stop()
 
 
@@ -61,28 +59,38 @@ class admin(commands.Cog):
         pass
 
     @admin_group.sub_command(description="Toggle whether user subscriptions will be sent to this server.")
-    async def toggle_notifications( #TODO add functionality to restrict if webhook is not assigned
+    async def toggle_notifications(
         self,
         inter: disnake.ApplicationCommandInteraction,
     ) -> None:
-        can_post = await DB.get_guild_posting(inter.guild_id, inter.guild.name)
+        can_post = await GuildService.get_posting_status(inter.guild_id, inter.guild.name)
+
+        # Check if webhook is configured before allowing enable
+        if not can_post:
+            guild_settings, _ = await GuildSettings.get_or_create(guild_id=inter.guild_id, name=inter.guild.name)
+            if not guild_settings.post_channel_webhook:
+                embed = disnake.Embed(
+                    description="Cannot enable notifications without a webhook configured.\n"
+                               "Please use `/admin add_subscriber_webhook` first."
+                )
+                await inter.response.send_message(embed=embed, ephemeral=True)
+                return
 
         if can_post:
             view = ConfirmView()
-            await inter.response.send_message(
-                """Are you sure you want to disable all subscriptions to this server?
-Disabling will delete all user subscriptions to this guild, and they will have to re-enable them manually.""",
-                view=view
+            embed = disnake.Embed(
+                description="**Are you sure you want to disable all subscriptions to this server?**\n\n"
+                           "Disabling will delete all user subscriptions to this guild, and they will have to re-enable them manually."
             )
+            await inter.response.send_message(embed=embed, view=view)
             await view.wait()
 
             if view.value == True:
-                await DB.toggle_guild_posting(inter.guild_id, inter.guild.name)
+                await GuildService.toggle_posting(inter.guild_id, inter.guild.name)
         else:
-            await DB.toggle_guild_posting(inter.guild_id, inter.guild.name)
-            await inter.response.send_message(
-                "Enabled subscription messaging"
-            )
+            await GuildService.toggle_posting(inter.guild_id, inter.guild.name)
+            embed = disnake.Embed(description="Enabled subscription messaging.")
+            await inter.response.send_message(embed=embed)
 
     @admin_group.sub_command(description="Tell the bot which webhook you want subscriptions posted to.")
     async def add_subscriber_webhook(
@@ -90,10 +98,9 @@ Disabling will delete all user subscriptions to this guild, and they will have t
         inter: disnake.ApplicationCommandInteraction,
         webhook_url: str
     ) -> None:
-        await DB.add_guild_webhook(inter.guild_id, webhook_url, inter.guild.name)
-        await inter.response.send_message(
-            f"Webhook: [{webhook_url}]\nAssigned successfully."
-        )
+        await GuildService.add_webhook(inter.guild_id, webhook_url, inter.guild.name)
+        embed = disnake.Embed(description="Webhook assigned successfully.")
+        await inter.response.send_message(embed=embed, ephemeral=True)
 
     @admin_group.sub_command(description="Add role for subscription permissions.")
     async def add_notification_role(
@@ -102,122 +109,148 @@ Disabling will delete all user subscriptions to this guild, and they will have t
         role_id: str
     ) -> None:
         if inter.guild.get_role(int(role_id)):
-            await DB.add_guild_role(inter.guild_id, role_id, inter.guild.name)
-            await inter.response.send_message(
-                "Role assigned successfully."
-                )
+            await GuildService.add_role(inter.guild_id, int(role_id), inter.guild.name)
+            embed = disnake.Embed(description="Role assigned successfully.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
         else:
-            await inter.response.send_message(
-                "This role is not a part of this server.",
-                ephemeral=True
-            )
+            embed = disnake.Embed(description="This role is not a part of this server.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
 
     @admin_group.sub_command(description="View server information")
     async def view_info(
         self,
         inter: disnake.ApplicationCommandInteraction
     ) -> None:
-        guild_settings, _ = await _models.GuildSettings.get_or_create(guild_id=inter.guild_id, name=inter.guild.name)
-        list_of_subscribers = await _models.User.filter(guilds__contains=inter.guild_id)
+        guild_settings, _ = await GuildSettings.get_or_create(guild_id=inter.guild_id, name=inter.guild.name)
+        list_of_subscribers = await User.filter(guilds__contains=inter.guild_id)
 
-        embed = disnake.Embed(
-            title=f"{inter.guild.name}'s Solsbot Helper Info:",
-            color=disnake.Color.purple(),
-            
-        ).add_field(
-            name="Subscriptions",
-            value=("On" if guild_settings.allow_posting else "Off")
-        ).add_field(
-            name="Subscriber Role",
-            value=(f"<@{guild_settings.can_post_role}>" if guild_settings.can_post_role else "No added role")
-        ).add_field(
-            name="Total Server Subscribers",
-            value=f"{len(list_of_subscribers)}"
-        ).add_field(
-            name="Subscribed Webhook",
-            value=(f"{guild_settings.post_channel_webhook}" if guild_settings.post_channel_webhook else "No webhook added")
+        # Build content for Components V2 display
+        status_text = "On" if guild_settings.allow_posting else "Off"
+        role_text = f"<@&{guild_settings.can_post_role}>" if guild_settings.can_post_role else "*No role set*"
+        webhook_text = "Configured" if guild_settings.post_channel_webhook else "*Not configured*"
+        
+        content = (
+            f"## {inter.guild.name}\n"
+            f"### Server Settings\n"
+            f"**Subscriptions:** {status_text}\n"
+            f"**Subscriber Role:** {role_text}\n"
+            f"**Total Subscribers:** {len(list_of_subscribers)}\n"
+            f"**Webhook:** {webhook_text}"
         )
-
-        if inter.guild and inter.guild.icon:
-            embed.set_thumbnail(url=inter.guild.icon.url)
-
+        
+        container = ui.Container(
+            ui.TextDisplay(content),
+            accent_colour=None,
+        )
+        
         await inter.response.send_message(
-            embed=embed
+            components=[container],
+            flags=disnake.MessageFlags(is_components_v2=True)
         )
 
-
-# Owner commands for debugging
+    # Owner commands for debugging
     @commands.slash_command(description="Dev Only: Simulate API Drop.")
     @commands.is_owner()
     async def simulate_api_message(
         self,
         inter: disnake.ApplicationCommandInteraction,
         username: str,
-        rare: bool = False,
-        
+        aura: str = commands.Param(
+            choices=[
+                "ARCHANGEL",
+                "AEGIS", "Memory, The Fallen!", "Frozen Sovereign", "Luminosity"
+            ],
+            description="Select the aura type to simulate"
+        ),
     ) -> None:
         from datetime import datetime, timezone
         import time
-        import random
-        if rare:
-            choice = random.randint(0,1)
-            if choice == 0:
-                icon_url = "https://cdn.mongoosee.com/assets/stars/Global.png"
-                name = "AEGIS"
-                rarity = "1 IN 825,000,000"
-            else:
-                icon_url = "https://cdn.mongoosee.com/assets/stars/Memory.png"
-                name = "Memory, The Fallen!"
-                rarity = "1 in 100 [From Oblivion Potion]"
+        
+        # Test aura presets
+        test_auras = {
+            # Normal format (rarity in description)
+            "ARCHANGEL": {
+                "icon_url": "https://cdn.mongoosee.com/assets/stars/Global.png",
+                "is_rare": False,
+                "rarity": "1 IN 250,000,000",
+            },
+            "AEGIS": {
+                "icon_url": "https://cdn.mongoosee.com/assets/stars/Global.png",
+                "is_rare": False,
+                "rarity": "1 IN 825,000,000",
+            },
+            # Rare format (separate Rarity field)
+            "Memory, The Fallen!": {
+                "icon_url": "https://cdn.mongoosee.com/assets/stars/Memory.png",
+                "is_rare": True,
+                "rarity": "1 in 100 [From Oblivion Potion]",
+            },
+            "Frozen Sovereign": {
+                "icon_url": "https://cdn.mongoosee.com/assets/stars/Global.png",
+                "is_rare": True,
+                "rarity": "1 in 1,000,000,000",
+            },
+            "Luminosity": {
+                "icon_url": "https://cdn.mongoosee.com/assets/stars/Global.png",
+                "is_rare": True,
+                "rarity": "1 in 1,200,000,000",
+            },
+        }
+        
+        aura_data = test_auras.get(aura)
+        if not aura_data:
+            await inter.response.send_message("Invalid aura selection.", ephemeral=True)
+            return
+        
+        icon_url = aura_data["icon_url"]
+        is_rare = aura_data["is_rare"]
+        rarity = aura_data["rarity"]
+        
+        # Build the embed based on format
+        if is_rare:
+            # Rare format: different description, separate Rarity field
+            description = f"> **Diami(@{username})** has found **[{aura}]**"
+            fields = [
+                {"name": "Rarity", "value": rarity, "inline": True},
+                {"name": "Rolls", "value": "1,000,000", "inline": True},
+                {"name": "Luck", "value": "24", "inline": True},
+                {"name": "Time Discovered", "value": f"<t:{int(time.time())}:R>", "inline": True},
+            ]
         else:
-            icon_url = "https://cdn.mongoosee.com/assets/stars/Global.png"
-            name = "ARCHANGEL"
-            rarity = "1 IN 250,000,000"
-
+            # Normal format: rarity in description
+            description = f"> **Diami(@{username})** HAS FOUND **{aura}**, CHANCE OF **{rarity}**"
+            fields = [
+                {"name": "Rolls", "value": "1,000,000", "inline": True},
+                {"name": "Luck", "value": "24", "inline": True},
+                {"name": "Time Discovered", "value": f"<t:{int(time.time())}:R>", "inline": True},
+            ]
 
         fake_payload = {
-        "action": "executeWebhook",
-        "data": {
-            "username": "Sol's Stat Tracker",
-            "avatarURL": "https://cdn.mongoosee.com/assets/solsstattracker/webhook/icon_2.png",
-            "embeds": [
-                {
-                    "author": {
-                        "icon_url": f"{icon_url}",
-                        "url": "https://www.roblox.com/users/468606899/profile",
-                        "name": f"Diami(@{username})" 
-                    },
-                    "description": f"> **Diami(@{username})** HAS FOUND **{name}**, CHANCE OF **{rarity}**",
-                    "fields": [
-                        {
-                            "name": "Rolls",
-                            "value": "1,000,000",
-                            "inline": True
+            "action": "executeWebhook",
+            "data": {
+                "username": "Sol's Stat Tracker",
+                "avatarURL": "https://cdn.mongoosee.com/assets/solsstattracker/webhook/icon_2.png",
+                "embeds": [
+                    {
+                        "author": {
+                            "icon_url": icon_url,
+                            "url": "https://www.roblox.com/users/468606899/profile",
+                            "name": f"Diami(@{username})"
                         },
-                        {
-                            "name": "Luck",
-                            "value": "24",
-                            "inline": True
-                        },
-                        {
-                            "name": "Time Discovered",
-                            "value": f"<t:{int(time.time())}:R>",
-                            "inline": True
-                        }
-                    ],
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "color": 5070842
-                }
-            ]
+                        "description": description,
+                        "fields": fields,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "color": 5070842
+                    }
+                ]
+            }
         }
-    }
         packet = {"payload": json.dumps(fake_payload)}
 
         self.bot.ws_manager.queue.put_nowait(packet)
-        await inter.response.send_message(
-            f"Simulated drop for **{username}**."
-        )
-    
+        embed = disnake.Embed(description=f"Simulated **{aura}** drop for **{username}**.")
+        await inter.response.send_message(embed=embed, ephemeral=True)
+
 
 def setup(bot: commands.InteractionBot):
     bot.add_cog(admin(bot=bot))

@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-bot-script
+  namespace: solsbot
+data:
+  test.py: |
+    import disnake
+    import asyncio
+    import os
+    import time
+    import threading
+    import websockets
+
+    async def websocket_worker():
+        uri = f"wss://api.mongoosee.com/solsstattracker/v2/gateway?token={os.environ.get('SOLS_BOT_TOKEN', '')}"
+        print(f'Connecting to mongoosee...', flush=True)
+        try:
+            async with websockets.connect(uri) as ws:
+                print('Mongoosee WS connected', flush=True)
+                while True:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=120)
+                    print(f'WS msg: {msg[:80]}...', flush=True)
+        except Exception as e:
+            print(f'WS error: {e}', flush=True)
+
+    class MinimalBot(disnake.Client):
+        async def on_ready(self):
+            print(f'Connected as {self.user}', flush=True)
+            asyncio.create_task(websocket_worker())
+            print('Watching for 120s...', flush=True)
+            
+    bot = MinimalBot()
+
+    def monitor():
+        start = time.time()
+        while time.time() - start < 130:
+            time.sleep(10)
+            print(f'[{time.time()-start:.0f}s] alive', flush=True)
+        os._exit(0)
+
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
+    asyncio.run(bot.start(os.environ['BOT_TOKEN']))
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-minimal-bot
+  namespace: solsbot
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      containers:
+      - name: test
+        image: diamivore/solsbot-helper:latest
+        command: ["python3", "/scripts/test.py"]
+        envFrom:
+        - secretRef:
+            name: solsbot-secrets
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+      volumes:
+      - name: script
+        configMap:
+          name: test-bot-script
+      restartPolicy: Never

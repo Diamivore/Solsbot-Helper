@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solsbot-config
+  namespace: solsbot
+  labels:
+    app.kubernetes.io/name: solsbot-helper
+    app.kubernetes.io/component: discord-bot
+data:
+
+  # Environment mode: "production" or "development"
+  ENVIRONMENT: "development"
+  
+  # Timezone (for log timestamps)
+  TZ: "UTC"
+  
+  # Owner webhook URL for error notifications (optional)
+  # OWNER_WEBHOOK_DEBUG_URL: "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"

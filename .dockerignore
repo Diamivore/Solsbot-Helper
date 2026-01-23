@@ -1,0 +1,125 @@
+# Exclude from Docker build context
+
+# Python virtual environment
+bin/
+lib/
+include/
+pyvenv.cfg
+venv/
+.venv/
+ENV/
+env/
+.env/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Docker files
+Dockerfile
+Dockerfile.*
+docker-compose*.yml
+docker-compose*.yaml
+.docker/
+.dockerignore
+
+# Kubernetes files
+k8s/
+kubernetes/
+*.yaml
+*.yml
+!requirements.txt
+
+# Re-include the requirements file
+!requirements.txt
+
+# Test files and coverage reports
+tests/
+test_*.py
+*_test.py
+conftest.py
+pytest.ini
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Documentation files
+docs/
+*.md
+!README.md
+LICENSE
+CHANGELOG*
+CONTRIBUTING*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# Logs and temporary files
+*.log
+logs/
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Database files
+=
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+
+# Session files
+*.session
+*.session.sql
+*.session-journal
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Other files
+*.
+example.json
+*.example
+Makefile
+scripts/

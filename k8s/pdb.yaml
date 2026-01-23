@@ -1,0 +1,72 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: solsbot-pdb
+  namespace: solsbot
+  labels:
+    app.kubernetes.io/name: solsbot-helper
+    app.kubernetes.io/component: discord-bot
+spec:
+  # Pod disruption budget - protects against accidental eviction during node drains/upgrades
+  # minAvailable: 0 allows disruptions but requires explicit acknowledgment
+  minAvailable: 0
+  
+  # Alternative: Use maxUnavailable instead
+  # maxUnavailable: 1
+  
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: solsbot-helper
+
+---
+# Network policy - restricts egress to required destinations only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: solsbot-network-policy
+  namespace: solsbot
+  labels:
+    app.kubernetes.io/name: solsbot-helper
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: solsbot-helper
+  policyTypes:
+    - Egress
+    - Ingress
+  
+  # No ingress needed - bot doesn't serve HTTP
+  ingress: []
+  
+  # Egress rules - allow outbound connections to required services
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    
+    # Allow HTTPS to Discord API (discord.com, cdn.discordapp.com)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # Allow MySQL/MariaDB connections (within cluster or external)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 3306
+    
+    # Allow WebSocket connections (wss:// uses port 443)
+    # Already covered by HTTPS rule above

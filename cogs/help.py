@@ -1,103 +1,161 @@
 import disnake
+import disnake.ui as ui
 from disnake.ext import commands
-
-# Views
-class HelpDropdown(disnake.ui.Select):
-    def __init__(self, bot: commands.InteractionBot, mapping: dict):
-        self.bot = bot
-        self.mapping = mapping
-
-        options = []
-        for cog_name, cmd_list, in mapping.items():
-            if not cmd_list: continue
-
-            description = (self.bot.get_cog(cog_name).description or "No description provided.")[:100]
-            options.append(disnake.SelectOption(
-                label=cog_name,
-                description=description
-            ))
-
-        super().__init__(
-            placeholder="Select a category for which you need help...",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-    async def callback(self, inter: disnake.MessageInteraction):
-        selected_cog = self.values[0]
-        cmd_list = self.mapping.get(selected_cog)
-
-        embed = disnake.Embed(
-            title=f"{selected_cog} Commands",
-            color=disnake.Color.purple()
-        )
-
-        for cmd in cmd_list:
-            desc = cmd.description or "No description."
-
-            embed.add_field(
-                name=f"/{cmd.name}",
-                value=desc,
-                inline=False
-            )
-
-        await inter.response.edit_message(embed=embed, view=self)
+import time
 
 
-class HelpView(disnake.ui.View):
-    def __init__(self, bot, mapping):
-        super().__init__(timeout=180)
-        self.add_item(HelpDropdown(bot, mapping))
+# Help content definitions (now as text for TextDisplay)
+MAIN_CONTENT = (
+    "## Solsbot Helper\n"
+    "Keep your friends updated on your Sol's RNG finds!\n"
+    "• Get notified in Discord when you or your friends find auras\n"
+    "• Subscribe to multiple servers at once\n"
+    "• Server admins can control who posts and where\n\n"
+    "*New here? Select a topic below to get started!*"
+)
+
+GETTING_STARTED_CONTENT = (
+    "## Getting Started\n\n"
+    "For Users:\n"
+    "1. Use `/add_username [Roblox Username]` to register your account\n"
+    "2. Use `/add_server [Server ID]` to add servers for notifications\n"
+    "3. That's it! You'll get notified when you find auras.\n"
+    "For Server Admins:\n"
+    "1. Use `/admin add_subscriber_webhook [URL]` to set your notification channel\n"
+    "2. Use `/admin toggle_notifications` to enable posting\n"
+    "3. Optionally, use `/admin add_notification_role [Role ID]` to restrict who can post"
+)
+
+
+def build_command_content(bot: commands.InteractionBot, cog_name: str, title: str) -> str:
+    """Build a markdown-formatted string listing commands from a cog."""
+    cog = bot.get_cog(cog_name)
+    lines = [f"# {title}\n"]
+    
+    if cog:
+        for cmd in cog.get_slash_commands():
+            # Skip owner-only commands (dev commands)
+            if hasattr(cmd, 'checks'):
+                if any(check.__qualname__.startswith('is_owner') for check in cmd.checks):
+                    continue
+            
+            # Check if it's a parent command with sub-commands
+            if hasattr(cmd, 'children') and cmd.children:
+                # It's a command group - list sub-commands instead
+                for sub_name, sub_cmd in cmd.children.items():
+                    desc = sub_cmd.description or "No description."
+                    lines.append(f"**/{cmd.name} {sub_name}**\n> {desc}\n")
+            else:
+                # Regular command
+                desc = cmd.description or "No description."
+                lines.append(f"**/{cmd.name}**\n> {desc}\n")
+    
+    return "\n".join(lines)
+
+
+def build_help_container(content: str, disabled: bool = False) -> list:
+    """Build Components V2 layout with Container and external buttons."""
+    dropdown = ui.StringSelect(
+        custom_id="help_dropdown",
+        placeholder="Select a help topic..." if not disabled else "This menu has expired",
+        disabled=disabled,
+        options=[
+            disnake.SelectOption(
+                label="Getting Started",
+                value="getting_started",
+                description="How to set up the bot",
+            ),
+            disnake.SelectOption(
+                label="User Commands",
+                value="user",
+                description="Commands for managing your notifications",
+            ),
+            disnake.SelectOption(
+                label="Admin Commands",
+                value="admin",
+                description="Server configuration commands",
+            ),
+        ]
+    )
+    
+    container = ui.Container(
+        ui.TextDisplay(content),
+        ui.Separator(spacing=disnake.SeparatorSpacing.small),
+        ui.ActionRow(dropdown),
+        accent_colour=None,  # None disables the accent bar entirely
+    )
+    
+    # Buttons outside the container
+    buttons = ui.ActionRow(
+        ui.Button(
+            label="Support",
+            style=disnake.ButtonStyle.link,
+            url="https://discord.gg/934ED3JZqs",
+        ),
+        ui.Button(
+            label="Invite the bot",
+            style=disnake.ButtonStyle.link,
+            url="https://discord.com/oauth2/authorize?client_id=1457837557516603465",
+        ),
+    )
+    
+    return [container, buttons]
+
+
+HELP_TIMEOUT = 60  # seconds
 
 
 # Main help command
 class HelpCommand(commands.Cog):
     def __init__(self, bot: commands.InteractionBot):
         self.bot = bot
+        # Track message timestamps for timeout: {message_id: last_interaction_time}
+        self._help_timestamps: dict[int, float] = {}
 
     @commands.slash_command(description="Show all available commands")
     async def help(self, inter: disnake.ApplicationCommandInteraction):
-        mapping ={}
-
-        for cog_name, cog in self.bot.cogs.items():
-            commands_list = cog.get_slash_commands()
-
-            if cog_name == "ErrorHandler":
-                continue
-
-            if commands_list:
-                mapping[cog_name] = commands_list
-
-        embed = disnake.Embed(
-            title="## How to use this bot",
-            description=("The Solsbot Helper keeps your friends updated on your recent finds!\n\n"
-                        "## **Users**\n"
-                        "### To start:\n"
-                        "- Use `/add_username [Roblox Username]` to add the account you want to get notifications from\n"
-                        "- Use `/add_server [Server ID (or options menu)]` to add the servers you want those notifications to be sent to\n"
-                        "### Misc:\n"
-                        "- Use `/view_usernames` to see all registered usernames\n"
-                        "- Use `/view_servers` to see all registered servers\n\n"
-                        "## **Admins**\n"
-                        "To get your server started:\n"
-                        "- Use `/admin add_subscriber_webhook [Webhook URL]` to add the webhook you wish notifications to be posted to\n"
-                        "- Use `/admin toggle_notifications` to allow messages to be posted to your webhook\n"
-                        "- Optionally, use `/admin add_notification_role [Role ID]` to add a role a user is required to have to post to your server\n"
-                        "### Misc:\n"
-                        "- Use `/admin view_info` to see your current server settings\n\n\n"
-                        "Use the dropdown menu below to see all other commands"
-
-            ),
-            color=1e1637
-        )
-
+        components = build_help_container(MAIN_CONTENT)
         await inter.response.send_message(
-            embed=embed, 
-            view=HelpView(self.bot, mapping), 
-            ephemeral=True
-            )
+            components=components,
+            flags=disnake.MessageFlags(is_components_v2=True)
+        )
+        # Track this message for timeout
+        msg = await inter.original_response()
+        self._help_timestamps[msg.id] = time.time()
+
+    @commands.Cog.listener("on_dropdown")
+    async def help_dropdown_handler(self, inter: disnake.MessageInteraction):
+        """Handle the help dropdown selections."""
+        if inter.component.custom_id != "help_dropdown":
+            return
         
+        msg_id = inter.message.id
+        
+        # Check timeout
+        if msg_id in self._help_timestamps:
+            if time.time() - self._help_timestamps[msg_id] > HELP_TIMEOUT:
+                # Expired - disable the dropdown and clean up
+                del self._help_timestamps[msg_id]
+                components = build_help_container(MAIN_CONTENT, disabled=True)
+                await inter.response.edit_message(components=components)
+                return
+            # Reset timer on valid interaction
+            self._help_timestamps[msg_id] = time.time()
+        
+        selected = inter.values[0]
+        
+        if selected == "getting_started":
+            content = GETTING_STARTED_CONTENT
+        elif selected == "user":
+            content = build_command_content(self.bot, "user", "User Commands")
+        elif selected == "admin":
+            content = build_command_content(self.bot, "admin", "Admin Commands")
+        else:
+            content = GETTING_STARTED_CONTENT
+        
+        components = build_help_container(content)
+        await inter.response.edit_message(components=components)
+
 
 def setup(bot: commands.InteractionBot):
     bot.add_cog(HelpCommand(bot))

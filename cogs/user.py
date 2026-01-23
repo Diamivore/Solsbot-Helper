@@ -1,11 +1,16 @@
 import disnake
+import disnake.ui as ui
 from disnake.ext import commands
 import logging
 
-from ._tortoiseORM_handler import DB
-from ._tortoiseORM_handler import GUILDDISALLOW, GUILDWEBHOOKERROR, ITEMNOTDEFINED, ITEMEXISTS
-
-from ._websocket import WORKERRUNNING, WORKERNOTDEFINED
+from services import (
+    UserService,
+    GuildNotAllowedError,
+    GuildWebhookError,
+    ItemNotFoundError,
+    ItemExistsError,
+)
+from infrastructure import WORKERRUNNING, WORKERNOTDEFINED
 
 # TODO: Create commands to handle auralist table
 
@@ -35,26 +40,18 @@ class user(commands.Cog):
         username: str,
     ) -> None:
         try:
-            await DB.add_username(inter.user.id, username.lower())
-            try:
-                self.bot.usernames.append(username.lower())
-                self.logger.debug(f"Successfully appended {username} to global list")
-            except Exception as e:
-                self.logger.error(f"Error while appending {username} to global list: {e}")
-            await inter.response.send_message(
-                f"Username **{username}** has been added!",
-                ephemeral=True
-            )
+            await UserService.add_username(inter.user.id, username.lower())
+            # Update in-memory cache
+            self.bot.ws_manager.add_username(username.lower())
+            self.logger.debug(f"Successfully added {username} to cache")
+            embed = disnake.Embed(description=f"Username **{username}** has been added.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
         except PermissionError:
-            await inter.response.send_message(
-                "That username is already registered!",
-                    ephemeral=True
-                    )
-        except ITEMEXISTS:
-            await inter.response.send_message(
-                "You already have that username registered!",
-                    ephemeral=True
-                    )
+            embed = disnake.Embed(description="That username is already registered.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except ItemExistsError:
+            embed = disnake.Embed(description="You already have that username registered.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
                 
     @commands.slash_command(description="Remove a Roblox username from this Discord account.")
     async def remove_username(
@@ -62,48 +59,43 @@ class user(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         username: str
     ) -> None:
+        username_lower = username.lower()
         try:
-            await DB.remove_username(inter.user.id, username)
-            try:
-                self.bot.usernames.remove(username)
-                self.logger.debug(f"Successfully removed {username} from global list")
-            except Exception as e:
-                self.logger.error(f"Error while removing {username} from global list: {e}")
-            await inter.response.send_message(
-                f"Username **{username}** has been removed.",
-                ephemeral=True
-            )
+            await UserService.remove_username(inter.user.id, username_lower)
+            # Update in-memory cache
+            self.bot.ws_manager.remove_username(username_lower)
+            self.logger.debug(f"Successfully removed {username_lower} from cache")
+            embed = disnake.Embed(description=f"Username **{username}** has been removed.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
         except PermissionError:
-            await inter.response.send_message(
-                "You do not own this user.",
-                ephemeral=True
-            )
-        except ITEMNOTDEFINED:
-            await inter.response.send_message(
-                "That user does not exist.",
-                ephemeral=True
-            )
+            embed = disnake.Embed(description="You do not own this user.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except ItemNotFoundError:
+            embed = disnake.Embed(description="That user does not exist.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
 
     @commands.slash_command(description="See all your stored usernames.")
     async def view_usernames(
         self,
         inter: disnake.ApplicationCommandInteraction
     ) -> None:
-        usernames = await DB.view_usernames(inter.user.id)
+        usernames = await UserService.view_usernames(inter.user.id)
 
         if not usernames:
-            await inter.response.send_message(
-                "You have no added users.",
-                ephemeral=True
-            )
+            embed = disnake.Embed(description="You have no added users.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
             return
 
-        response = ""
-        for username in usernames:
-            response = response + f"{username}\n"
-                                                 
+        usernames_list = "\n".join(f"• {username}" for username in usernames)
+        content = f"## Your Usernames\n{usernames_list}"
+        
+        container = ui.Container(
+            ui.TextDisplay(content),
+            accent_colour=None,
+        )
         await inter.response.send_message(
-            "**Your Users:**\n" + response,
+            components=[container],
+            flags=disnake.MessageFlags(is_components_v2=True),
             ephemeral=True
         )
 
@@ -116,37 +108,30 @@ class user(commands.Cog):
         try:
             guild_id = int(server_id)
         except ValueError:
-            await inter.response.send_message(
-                "Invalid ID. Please provide a numerical server ID.",
-                ephemeral=True
-            )
+            embed = disnake.Embed(description="Invalid ID. Please provide a numerical server ID.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
             return
 
         guild = self.bot.get_guild(guild_id)
         guild_name = guild.name if guild else "Unknown Server"
 
         try:
-            
-            await DB.add_guild_subscription(inter.user.id, guild_id, guild_name)   
-            await inter.response.send_message(
-                "Server added to subscription list.",
-                ephemeral=True
+            await UserService.add_guild_subscription(inter.user.id, guild_id, guild_name)
+            embed = disnake.Embed(description="Server added to subscription list.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except GuildNotAllowedError:
+            embed = disnake.Embed(
+                description="This server does not currently allow notifications.\n\n*If you think this is wrong, please ask this server's admins to use `/admin toggle_notifications`*"
             )
-        except GUILDDISALLOW:
-            await inter.response.send_message(
-                "This server does not currently allow notifications.\nIf you think this is wrong, please ask this server's admins to use /toggle_notifications",
-                ephemeral=True
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except GuildWebhookError:
+            embed = disnake.Embed(
+                description="This server currently has no assigned notification webhook.\n\n*Please ask the admins to use `/admin add_subscriber_webhook`*"
             )
-        except GUILDWEBHOOKERROR:
-            await inter.response.send_message(
-                "This server currently has no assigned notification webhook.\nPlease ask the admins to use /add_webhook",
-                ephemeral=True
-            )
-        except ITEMEXISTS:
-            await inter.response.send_message(
-                "You have already added this server!",
-                ephemeral=True
-            )
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except ItemExistsError:
+            embed = disnake.Embed(description="You have already added this server.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
 
     @commands.slash_command(description="Remove a server to post notifications to.")
     async def remove_server(
@@ -157,23 +142,17 @@ class user(commands.Cog):
         try:
             server_id = int(server_id)
         except ValueError:
-            await inter.response.send_message(
-                "Invalid ID. Please provide a numerical server ID.",
-                ephemeral=True
-            )
+            embed = disnake.Embed(description="Invalid ID. Please provide a numerical server ID.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
             return
 
         try:
-            await DB.remove_guild_subscription(inter.user.id, server_id)
-            await inter.response.send_message(
-                "Server successfully removed!",
-                ephemeral=True
-            )
-        except ITEMNOTDEFINED:
-            await inter.response.send_message(
-                "You do not have this server added!",
-                ephemeral=True
-            )
+            await UserService.remove_guild_subscription(inter.user.id, server_id)
+            embed = disnake.Embed(description="Server successfully removed.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
+        except ItemNotFoundError:
+            embed = disnake.Embed(description="You do not have this server added.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
 
     @commands.slash_command(description="View all servers you post notficiations to.")
     async def view_servers(
@@ -181,27 +160,30 @@ class user(commands.Cog):
         inter: disnake.ApplicationCommandInteraction
     ) -> None:
         try:
-            guilds = await DB.view_user_guilds(inter.user.id)
-        except ITEMNOTDEFINED:
-            await inter.response.send_message(
-                "You are not subscribed to any guilds currently.",
-                ephemeral=True
-            )
+            guilds = await UserService.view_user_guilds(inter.user.id)
+        except ItemNotFoundError:
+            embed = disnake.Embed(description="You are not subscribed to any guilds currently.")
+            await inter.response.send_message(embed=embed, ephemeral=True)
             return
 
         if guilds:
-            guild_str = ""
-            for guild in guilds:
-                guild: disnake.Guild = await self.bot.fetch_guild(guild)
+            guild_lines = []
+            for guild_id in guilds:
+                guild: disnake.Guild = await self.bot.fetch_guild(guild_id)
                 if not guild:
                     continue
-
-                guild_name = guild.name
-                guild_id = guild.id
-
-                guild_str = guild_str + f"{guild_name}: {guild_id}\n"
+                guild_lines.append(f"• **{guild.name}** (`{guild.id}`)")
+            
+            guilds_list = "\n".join(guild_lines)
+            content = f"## Your Servers\n{guilds_list}"
+            
+            container = ui.Container(
+                ui.TextDisplay(content),
+                accent_colour=None,
+            )
             await inter.response.send_message(
-                "**Your Guilds:**\n" + guild_str,
+                components=[container],
+                flags=disnake.MessageFlags(is_components_v2=True),
                 ephemeral=True
             )
 
@@ -213,7 +195,7 @@ class user(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         string: str
         ) -> list:
-        usernames = await DB.view_usernames(inter.user.id)
+        usernames = await UserService.view_usernames(inter.user.id)
         return [u for u in usernames if string.lower() in u.lower()]
     
     @remove_server.autocomplete("server_id")
@@ -222,7 +204,10 @@ class user(commands.Cog):
         inter: disnake.ApplicationCommandInteraction,
         string: str
         ) -> list:
-        user_guild_ids = await DB.view_user_guilds(inter.user.id)
+        try:
+            user_guild_ids = await UserService.view_user_guilds(inter.user.id)
+        except ItemNotFoundError:
+            return []
         
         choices = []
         for g_id in user_guild_ids:
