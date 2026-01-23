@@ -60,10 +60,21 @@ class WebSocketClient:
     This is a thin infrastructure layer that:
     - Manages WebSocket connection lifecycle
     - Handles reconnection with backoff
-    - Receives messages andal-time notifications.
+    - Receives messages and enqueues for processing
+    - Delegates all processing to NotificationService
     
     Architecture:
-        WebSocket → Queue → NotificationService → Webhooksnfig = ServiceConfig.from_environment()
+        WebSocket → Queue → NotificationService → Webhooks
+        
+    The WebSocketClient is intentionally thin - all business logic
+    (parsing, filtering, permission checks, webhook delivery) is
+    delegated to the services layer for testability and separation
+    of concerns.
+    """
+    
+    def __init__(self, bot):
+        self._bot = bot
+        self._config = ServiceConfig.from_environment()
         
         # Queue for message processing
         self.queue = asyncio.Queue(maxsize=self._config.queue.max_size)
@@ -88,7 +99,20 @@ class WebSocketClient:
         ├── CircularDeduplicationCache (duplicate detection)
         ├── PermissionService (role checks)
         │   └── DiscordBotGatewayAdapter (Discord API)
-        ├──Initialize service layer components.
+        ├── WebhookValidationService (URL validation)
+        └── GuildService.get_user_destinations (destination loading)
+        """
+        if self._notification_service is not None:
+            return  # Already initialized
+        
+        # Create gateway adapter for Discord API access
+        self._gateway_adapter = DiscordBotGatewayAdapter(self._bot)
+        
+        # Create username cache with DB loader
+        self._username_cache = InMemoryUsernameCache(
+            db_loader=UserRepository.get_all_active_usernames
+        )
+        
         # Load initial usernames
         await self._username_cache.refresh_from_db()
         logger.info(f"Loaded {len(self._username_cache)} usernames into cache")
@@ -130,13 +154,13 @@ class WebSocketClient:
             logger.debug(f"Username cache refreshed: {len(self._username_cache)} usernames")
     
     def add_username(self, username: str) -> None:
-        """Add username to cache."""
+        """Add username to cache (called when user registers)."""
         if self._username_cache:
             self._username_cache.add(username)
             logger.debug(f"Added '{username}' to cache")
     
     def remove_username(self, username: str) -> None:
-        """Remove username from cache."""
+        """Remove username from cache (called when user unregisters)."""
         if self._username_cache:
             self._username_cache.remove(username)
             logger.debug(f"Removed '{username}' from cache")
@@ -150,7 +174,19 @@ class WebSocketClient:
     # ─────────────────────────────────────────────────────────────────
     
     async def websocket_worker(self, api_key: str, ready_event: asyncio.Event) -> None:
-        """Main WebSocket connection loop with reconnection handling."""
+        """
+        Main WebSocket connection loop.
+        
+        Handles:
+        - Initial connection with limited retries (fail-fast)
+        - Runtime reconnection with exponential backoff
+        - Zombie connection detection
+        - Message enqueueing with backpressure handling
+        
+        Args:
+            api_key: Third-party API authentication token
+            ready_event: Event to signal when first message received
+        """
         retry_count = 0
         ws_config = self._config.websocket
         
@@ -230,7 +266,11 @@ class WebSocketClient:
                 # Wait for message with zombie detection timeout
                 message = await asyncio.wait_for(
                     websocket.recv(),
-           Handle an active WebSocket connection.        return  # Exit to trigger reconnect
+                    timeout=zombie_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"No message received for {zombie_timeout}s, reconnecting...")
+                return  # Exit to trigger reconnect
             
             # Signal ready on first successful message
             if message and not self._has_connected:
@@ -289,7 +329,12 @@ class WebSocketClient:
                     self.queue.task_done()
                     continue
                 
-           Process queued messages and dispatch notifications.            
+                raw_json = packet["payload"]
+                
+                try:
+                    # Parse payload
+                    parse_result = self._notification_service._parser.parse_raw_message(raw_json)
+                    
                     if not parse_result.embeds:
                         self.queue.task_done()
                         continue

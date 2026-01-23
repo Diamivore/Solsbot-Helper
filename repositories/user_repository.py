@@ -112,7 +112,11 @@ class UserRepository:
         
         Used for initializing the in-memory username cache.
         """
-        useGet all usernames with at least one guild subscription.    if username.user_id.guilds:
+        usernames = await UsernameList.all().prefetch_related("user_id")
+        active = []
+        
+        for username in usernames:
+            if username.user_id.guilds:
                 active.append(username.name)
         
         return active

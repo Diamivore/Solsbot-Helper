@@ -2,6 +2,7 @@
 
 Discord bot that bridges Sol's RNG game notifications to Discord servers. Users register their Roblox usernames, and when they get auras in-game, notifications are posted to subscribed servers via webhooks.
 
+Add the bot: https://discord.com/oauth2/authorize?client_id=1457837557516603465
 ## Quick Start
 
 ## Production Deployment (Kubernetes)
