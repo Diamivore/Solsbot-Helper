@@ -115,7 +115,7 @@ FLUSH PRIVILEGES;
 
 Connection string for `.env`:
 ```
-DEV_DB_URL=mysql+asyncmy://solsbot:your-password@localhost:3306/solsbot_db
+DEV_DB_URL=mysql://solsbot:your-password@localhost:3306/solsbot_db
 ```
 
 Tables are auto-created on first run via Tortoise ORM.

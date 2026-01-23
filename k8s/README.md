@@ -203,7 +203,7 @@ See [DATABASE_SETUP.md](DATABASE_SETUP.md) for detailed instructions.
 
 Connection string format:
 ```
-mysql+asyncmy://solsbot:password@host:3306/solsbot_db
+mysql://solsbot:password@host:3306/solsbot_db
 ```
 
 ## Health Check Strategy

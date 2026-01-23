@@ -52,12 +52,12 @@ EXIT;
 
 For local `.env`:
 ```
-DEV_DB_URL=mysql+asyncmy://solsbot:your-secure-password@localhost:3306/solsbot_db
+DEV_DB_URL=mysql://solsbot:your-secure-password@localhost:3306/solsbot_db
 ```
 
 For Kubernetes secrets (if DB is on same host as cluster):
 ```
-mysql+asyncmy://solsbot:your-secure-password@host.docker.internal:3306/solsbot_db
+mysql://solsbot:your-secure-password@host.docker.internal:3306/solsbot_db
 ```
 
 Or use your machine's local IP (e.g., `192.168.1.x`).
@@ -74,7 +74,7 @@ kubectl apply -f k8s/mysql.yaml
 
 Then use this connection string:
 ```
-mysql+asyncmy://solsbot:password@mysql-service.solsbot.svc.cluster.local:3306/solsbot_db
+mysql://solsbot:password@mysql-service.solsbot.svc.cluster.local:3306/solsbot_db
 ```
 
 Edit the passwords in `mysql.yaml` before deploying.
