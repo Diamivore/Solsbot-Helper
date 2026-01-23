@@ -149,7 +149,7 @@ class admin(commands.Cog):
         )
 
     # Owner commands for debugging
-    @commands.slash_command(description="Dev Only: Simulate API Drop.")
+    @commands.slash_command(description="Dev Only: Simulate API Drop.", hidden=True)
     @commands.is_owner()
     async def simulate_api_message(
         self,
